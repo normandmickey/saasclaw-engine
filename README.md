@@ -31,7 +31,17 @@ django-admin startproject myapp
 cd myapp
 ```
 
-### 2. Add to INSTALLED_APPS
+### 2. Install dependencies
+
+```bash
+# The engine
+pip install saasclaw-engine
+
+# PostgreSQL adapter + Celery broker
+pip install 'psycopg[binary]' 'celery[redis]' redis
+```
+
+### 3. Add to INSTALLED_APPS
 
 ```python
 # settings.py
@@ -54,48 +64,56 @@ INSTALLED_APPS = [
 ]
 ```
 
-### 3. Configure settings
+### 4. Configure settings
 
 ```python
 # settings.py
 
-# Database — PostgreSQL required
 DATABASE_URL = 'postgresql://user:pass@localhost/myapp'
 
-# Redis
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
 
-# LLM providers (user-provided keys stored encrypted in DB)
-# No provider keys needed in settings — users add them via the UI
-
-# Paths
-GIT_ROOT = '/srv/myapp/git'           # Bare repos
-PROJECT_ROOT = '/srv/myapp/projects'   # Deployed projects
+# Filesystem paths (adjust to your server)
+GIT_ROOT = '/srv/myapp/git'           # Bare git repos
+PROJECT_ROOT = '/srv/myapp/projects'   # Deployed project checkouts
 LOG_ROOT = '/srv/myapp/logs'          # Deploy logs
 
-# GitHub App (optional — for connecting user repos)
-GITHUB_APP_ID = ''                     # GitHub App ID
-GITHUB_APP_PRIVATE_KEY_PATH = ''       # Path to .pem file
-GITHUB_WEBHOOK_SECRET = ''             # Webhook secret
+# SSL — the deploy pipeline expects Let's Encrypt certs at these paths:
+#   /etc/letsencrypt/live/yourdomain.com/fullchain.pem
+#   /etc/letsencrypt/live/yourdomain.com/privkey.pem
+#   /etc/letsencrypt/live/preview.yourdomain.com/fullchain.pem
+#   /etc/letsencrypt/live/preview.yourdomain.com/privkey.pem
+# See DNS & SSL section below.
 
-# Static files
+# GitHub App (optional — see GitHub App section below)
+GITHUB_APP_ID = ''
+GITHUB_APP_PRIVATE_KEY_PATH = ''
+GITHUB_WEBHOOK_SECRET = ''
+
 STATIC_URL = '/static/'
 STATIC_ROOT = '/var/www/myapp/static'
 ```
 
-### 4. Run migrations
+### 5. Create directories and run migrations
 
 ```bash
+# Create filesystem structure
+sudo mkdir -p /srv/myapp/git /srv/myapp/projects /srv/myapp/logs
+
+# Migrate
 python manage.py migrate
+
+# Create admin user
+python manage.py createsuperuser
 ```
 
-### 5. Wire the URLs
+### 6. Wire the URLs
 
 ```python
 # urls.py
 
-from django.urls import path, include
+from django.urls import path
 from saasclaw_engine.integrations.views import github_setup, github_webhook
 
 urlpatterns = [
@@ -106,18 +124,190 @@ urlpatterns = [
 ]
 ```
 
-### 6. Run it
+### 7. Run it
 
 ```bash
 # Web
-python manage.py runserver
+gunicorn myapp.wsgi:application --bind 127.0.0.1:8000 --workers 4
 
-# Celery worker (for async deploys)
+# Celery worker (async deploys)
 celery -A myapp worker -l info
 
-# Celery beat (for periodic tasks)
+# Celery beat (periodic tasks)
 celery -A myapp beat -l info
 ```
+
+---
+
+## DNS & SSL
+
+The deploy pipeline automatically generates nginx configs for each project. It needs DNS records pointing to your server and SSL certificates for every domain it serves.
+
+### DNS Records
+
+Assuming your server IP is `203.0.113.50` and your domain is `example.com`, create these records at your DNS provider:
+
+| Type | Name | Value | Purpose |
+|------|------|-------|---------|
+| A | `@` | `203.0.113.50` | Main app (`example.com`) |
+| A | `preview` | `203.0.113.50` | Preview subdomain (`preview.example.com`) |
+| A | `*` | `203.0.113.50` | Wildcard — catches `*.example.com` (production deploys) and `*.preview.example.com` (preview deploys) |
+
+**If using Cloudflare**, set all records to **DNS only** (grey cloud, not orange proxy). The engine generates its own nginx SSL config using Let's Encrypt certs — Cloudflare's proxy would conflict.
+
+> **Wildcard A records** aren't supported by all DNS providers. If yours doesn't support them, add individual A records for each project slug as you create them. The engine can't provision DNS — records must exist before deployment.
+
+### SSL Certificates (Let's Encrypt)
+
+The deploy pipeline looks for certs at these paths:
+
+```
+/etc/letsencrypt/live/example.com/fullchain.pem
+/etc/letsencrypt/live/example.com/privkey.pem
+/etc/letsencrypt/live/preview.example.com/fullchain.pem
+/etc/letsencrypt/live/preview.example.com/privkey.pem
+```
+
+It also includes these Let's Encrypt files in every nginx config:
+
+```
+/etc/letsencrypt/options-ssl-nginx.conf
+/etc/letsencrypt/ssl-dhparams.pem
+```
+
+You need **two wildcard certificates**. Request them with certbot:
+
+```bash
+# Production wildcard — covers example.com and *.example.com
+sudo certbot certonly --manual --preferred-challenges dns \
+  -d example.com -d '*.example.com' \
+  --agree-tos --email you@example.com
+
+# Preview wildcard — covers preview.example.com and *.preview.example.com
+sudo certbot certonly --manual --preferred-challenges dns \
+  -d preview.example.com -d '*.preview.example.com' \
+  --agree-tos --email you@example.com
+```
+
+**Using Cloudflare DNS?** certbot's Cloudflare plugin can automate the DNS challenge:
+
+```bash
+# Install the plugin
+pip install certbot-dns-cloudflare
+
+# Create credentials file
+sudo mkdir -p /etc/cloudflare
+sudo tee /etc/cloudflare/credentials.ini << 'EOF'
+dns_cloudflare_api_token = YOUR_API_TOKEN
+EOF
+sudo chmod 600 /etc/cloudflare/credentials.ini
+
+# Request certs (non-interactive)
+sudo certbot certonly --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
+  -d example.com -d '*.example.com'
+
+sudo certbot certonly --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/cloudflare/credentials.ini \
+  -d preview.example.com -d '*.preview.example.com'
+```
+
+### Auto-renewal
+
+Add a cron job to renew certs before they expire:
+
+```bash
+sudo crontab -e
+# Add this line:
+0 3 * * * certbot renew --quiet --deploy-hook "systemctl reload nginx"
+```
+
+---
+
+## GitHub App Integration
+
+The engine can clone, commit, and push to users' GitHub repos via a [GitHub App](https://docs.github.com/en/developers/apps). Users install the app on their account/org, and the engine creates installation-scoped access tokens.
+
+### How It Works
+
+1. You create a GitHub App (once)
+2. Users install it on their account or org
+3. GitHub fires an `installation` webhook to your server
+4. The engine records the installation
+5. When the agent needs to work on a connected repo, it creates an installation access token (signed with your app's private key)
+6. The agent clones, commits, and pushes using that token
+
+### Step 1: Create the GitHub App
+
+1. Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**
+2. Fill in:
+   - **GitHub App name**: e.g. `MyApp Builder`
+   - **Homepage URL**: your app's URL (e.g. `https://example.com`)
+   - **Webhook URL**: `https://example.com/github/webhook/`
+   - **Webhook secret**: generate a random string and save it
+3. Under **Repository permissions**:
+   - **Contents**: Read and write
+   - **Metadata**: Read-only
+4. Under **Subscribe to events**: check `installation`
+5. Click **Create GitHub App**
+6. On the app's settings page, click **Generate a new private key** and download the `.pem` file
+
+### Step 2: Store the credentials
+
+Copy the `.pem` file to your server:
+
+```bash
+sudo mkdir -p /etc/myapp/secrets
+sudo cp ~/Downloads/myapp-builder.2024-01-01.private-key.pem /etc/myapp/secrets/github-app.pem
+sudo chmod 600 /etc/myapp/secrets/github-app.pem
+```
+
+Add to your Django settings:
+
+```python
+GITHUB_APP_ID = '123456'                                    # From the GitHub App settings page
+GITHUB_APP_PRIVATE_KEY_PATH = '/etc/myapp/secrets/github-app.pem'
+GITHUB_WEBHOOK_SECRET = 'whsec_your-random-secret-here'      # What you generated in step 1
+```
+
+### Step 3: Verify the webhook URL works
+
+Before users can install your app, GitHub needs to successfully deliver a `ping` webhook. Make sure:
+
+- Your server is reachable at the webhook URL (`https://example.com/github/webhook/`)
+- The URL is wired in your `urls.py` (see Quick Start step 6)
+- Gunicorn is running and can accept POST requests
+
+### Permissions Summary
+
+| Permission | Access | Why |
+|------------|--------|-----|
+| Contents | Read & write | Clone repos, commit & push agent changes |
+| Metadata | Read-only | Identify installations |
+
+### How Users Connect Their Repos
+
+1. User visits your app's GitHub setup page (e.g. `https://example.com/github/setup/`)
+2. GitHub App installation flow opens (you redirect to GitHub's installation URL)
+3. User chooses which repos to grant access to
+4. GitHub redirects back to your app and fires an `installation` webhook
+5. The engine records the installation (app ID, account, repo list)
+6. When the user creates a project connected to a GitHub repo, the engine uses the installation token to clone and push
+
+---
+
+## System Requirements
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Python | 3.11+ | |
+| PostgreSQL | 14+ | Required (not SQLite) |
+| Redis | 6+ | Celery broker |
+| Nginx | 1.18+ | Per-project config generation |
+| Certbot | 1.20+ | SSL certificate management |
+| Node.js | 18+ | Via fnm (auto-detected per project for Vite/Next.js builds) |
+| Let's Encrypt | | certs at `/etc/letsencrypt/live/` |
+| `.NET` SDK | 9+ | Optional — auto-installed on demand for .NET projects |
 
 ## Engine API
 
@@ -158,6 +348,9 @@ from saasclaw_engine.integrations.github import (
     commit_and_push_repo,
     get_installation_token,
 )
+
+# Get an installation access token for a user's GitHub App installation
+token = get_installation_token(installation_id)
 
 # Clone a user's repo into a worktree
 clone_or_update_repo(project, token)
