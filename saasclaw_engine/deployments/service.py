@@ -799,7 +799,7 @@ def _ensure_nginx_proxy(service_name, domain, port, log_file=None, upgrade=False
         '',
         '    include /etc/nginx/snippets/saasclaw-preview-branding.conf;',
         '',
-        '    location / {',,
+        '    location / {',
         '        proxy_pass http://127.0.0.1:' + str(port) + ';',
         '        proxy_set_header Host $host;',
         '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
