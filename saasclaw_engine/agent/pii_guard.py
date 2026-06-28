@@ -16,103 +16,94 @@ Usage:
 
 import re
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Patterns ──────────────────────────────────────────────────────────────
-# Each pattern: (compiled regex, placeholder template, label for logging)
+# ORDER MATTERS: first match at a position wins. Put specific patterns first.
 
 PATTERNS = [
-    # US Social Security Numbers: 123-45-6789 or 123 45 6789 or 123456789
+    # 1. Database connection strings (must run before email — email steals passwords)
+    #    Handles empty username: redis://:password@localhost:6379/0
     (re.compile(
-        r'\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b'
+        r'(?i)\b(?:mysql|postgres(?:ql)?|mongodb|redis)://(?:[\w._-]+(?::[^\s@]+)?|:[^\s@]+)@[\w.-]+(?::\d+)?(?:/[\w./-]*)?'
+    ), '{{DB_CONN}}', 'Database Connection'),
+
+    # 2. US Social Security Numbers: 123-45-6789, 123 45 6789, 123456789
+    #    Valid areas: 001-899 (excludes 000, 666)
+    #    Valid groups: 01-99 (excludes 00), serials: 0001-9999 (excludes 0000)
+    (re.compile(
+        r'(?<!\d)(?!000|666)\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}(?!\d)'
     ), '{{SSN}}', 'SSN'),
 
-    # Credit card numbers (Visa 16, Mastercard 16, Amex 15, with optional dashes/spaces)
+    # 3. Credit card numbers (Visa, MC, Amex, Discover)
     (re.compile(
-        r'\b(?:4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'           # Visa
-        r'|5[1-5]\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'          # Mastercard
-        r'|3[47]\d{2}[\s-]?\d{6}[\s-]?\d{5}'                      # Amex
-        r'|6(?:011|5\d{2})[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b'   # Discover
+        r'(?<!\d)(?:4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'
+        r'|5[1-5]\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'
+        r'|3[47]\d{2}[\s-]?\d{6}[\s-]?\d{5}'
+        r'|6(?:011|5\d{2})[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})(?!\d)'
     ), '{{CC}}', 'Credit Card'),
 
-    # US phone numbers: (123) 456-7890, 123-456-7890, etc.
+    # 4. US phone numbers
     (re.compile(
-        r'\(?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})'
+        r'(?<!\d)\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)'
     ), '({{PHONE}})', 'Phone'),
 
-    # Email addresses (but not common code patterns like localhost)
+    # 5. Email addresses (excludes localhost)
     (re.compile(
         r'\b[A-Za-z0-9._%+-]+@(?!localhost\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
     ), '{{EMAIL}}', 'Email'),
 
-    # US mailing addresses (street + city/state/zip pattern)
-    # e.g., "123 Main St, Springfield, IL 62704"
+    # 6. US mailing addresses (street + city/state/zip)
     (re.compile(
         r'\b\d+\s+[A-Za-z0-9\s,.]+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Ln|Lane|Rd|Road|Ct|Court|Pl|Place|Way|#\d+)\s*,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b'
     ), '{{ADDRESS}}', 'Address'),
 
-    # Bank routing numbers (9 digits, not SSN format — typically preceded by routing context)
+    # 7. Bank routing numbers (context keyword required)
     (re.compile(
-        r'\b(?:routing|aba|bank\s*routing)\s*(?:number|no\.?|#)?:?\s*\d{9}\b',
-        re.IGNORECASE
+        r'(?i)\b(?:routing|aba|bank[_\s-]*routing)[_\s-]*(?:number|no\.?|#)?[\s"]*:?[\s"]*\d{9}\b'
     ), '{{ROUTING}}', 'Bank Routing'),
 
-    # Bank account numbers (context-dependent, 8-17 digits with bank/routing context)
+    # 8. Bank account numbers (context keyword required)
+    #    Handles JSON: "account": "1234567890123456"
     (re.compile(
-        r'\b(?:account\s*(?:number|no\.?|#)?)\s*:?\s*\d{8,17}\b',
-        re.IGNORECASE
+        r'(?i)\b(?:account[_\s-]*(?:number|no\.?|#)?)[\s"]*:?\s*"?\d{8,17}\b'
     ), '{{ACCT}}', 'Bank Account'),
 
-    # Dates of birth in common formats (DOB context)
+    # 9. Salary / compensation (context keyword required)
     (re.compile(
-        r'\b(?:date\s*of\s*birth|DOB|born(?:\s+on)?)\s*:?\s*(?:\d{1,2}[/\-.]\s*){2}\d{2,4}\b',
-        re.IGNORECASE
-    ), '{{DOB}}', 'Date of Birth'),
-
-    # Passport numbers (US: 9 digits, often starting with letters internationally)
-    (re.compile(
-        r'\b(?:passport\s*(?:number|no\.?|#)?)\s*:?\s*[A-Z]?\d{8,9}\b',
-        re.IGNORECASE
-    ), '{{PASSPORT}}', 'Passport'),
-
-    # Driver's license numbers (varies by state, but common pattern: 1 letter + 8-12 digits)
-    (re.compile(
-        r"""\b(?:driver(?:'s|\\')?\s*(?:license|lic(?:ense)?)\s*(?:number|no\.?#)?)\s*:?\s*[A-Z]?\d{7,13}\b""",
-        re.IGNORECASE
-    ), '{{DL}}', 'Driver License'),
-
-    # Salary / compensation with dollar amounts (contextual)
-    (re.compile(
-        r'\b(?:salary|annual\s*salary|base\s*pay|compensation|hourly\s*rate|wage|pay\s*rate)\s*:?\s*\$?[\d,]+(?:\.\d{2})?(?:\s*(?:per\s*)?(?:year|annum|month|hour|hr))?\b',
-        re.IGNORECASE
+        r'(?i)\b(?:salary|annual[_\s-]*salary|base[_\s-]*pay|compensation|hourly[_\s-]*rate|wage|pay[_\s-]*rate)[\s"]*:?\s*"?[\$]?[\d,]+(?:\.\d{2})?(?:\s*(?:per\s*)?(?:year|annum|month|hour|hr))?\b'
     ), '{{SALARY}}', 'Salary'),
 
-    # IP addresses (internal infrastructure)
+    # 10. Dates of birth (context keyword required)
     (re.compile(
-        r'\b(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\b'
+        r'(?i)(?:date[_\s-]*of[_\s-]*birth|dob|born(?:\s+on)?|birth[_\s-]?date|birthday)[\s":,]*\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}'
+    ), '{{DOB}}', 'Date of Birth'),
+
+    # 11. Passport numbers (context keyword required)
+    (re.compile(
+        r'(?i)\b(?:passport[_\s-]?(?:number|no\.?|#|id)?)[\s"]*:?\s*"?[A-Z]?\d{8,9}\b'
+    ), '{{PASSPORT}}', 'Passport'),
+
+    # 12. Driver's license numbers (context keyword required)
+    (re.compile(
+        r"""(?i)\b(?:driver(?:'s|\\')?\s*(?:license|lic(?:ense)?)\s*(?:number|no\.?#)?)\s*:?\s*[A-Z]?\d{7,13}\b"""
+    ), '{{DL}}', 'Driver License'),
+
+    # 13. IP addresses
+    (re.compile(
+        r'(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(?!\d)'
     ), '{{IP}}', 'IP Address'),
 
-    # AWS access key IDs
+    # 14. AWS access key IDs
     (re.compile(
         r'\bAKIA[0-9A-Z]{16}\b'
     ), '{{AWS_KEY}}', 'AWS Key'),
-
-    # Database connection strings with passwords
-    (re.compile(
-        r'\b(?:mysql|postgres|postgresql|mongodb|redis)://[^\s:]+:[^\s@]+@[^\s]+',
-        re.IGNORECASE
-    ), '{{DB_CONN}}', 'Database Connection'),
 ]
 
 
 def detect_pii(text: str) -> list[dict]:
-    """Scan text and return a list of detected PII matches.
-
-    Returns:
-        List of dicts with keys: pattern, label, match, start, end
-    """
+    """Scan text and return a list of detected PII matches."""
     findings = []
     for regex, placeholder, label in PATTERNS:
         for m in regex.finditer(text):
@@ -123,7 +114,6 @@ def detect_pii(text: str) -> list[dict]:
                 'end': m.end(),
                 'placeholder': placeholder,
             })
-    # Sort by position
     findings.sort(key=lambda f: f['start'])
     return findings
 
@@ -131,13 +121,10 @@ def detect_pii(text: str) -> list[dict]:
 def sanitize_for_llm(text: str, enabled: bool = True) -> tuple[str, list[dict]]:
     """Sanitize text by redacting detected PII patterns.
 
-    Args:
-        text: The text to sanitize (prompt, file content, tool output, etc.)
-        enabled: If False, return text unchanged (sanitization disabled)
+    Uses character-level claim map: first pattern at each position wins.
+    This avoids offset corruption from overlapping replacements.
 
-    Returns:
-        Tuple of (sanitized_text, redaction_log).
-        redaction_log is a list of dicts describing what was redacted.
+    Returns: (sanitized_text, redaction_log)
     """
     if not enabled or not text:
         return text, []
@@ -146,45 +133,45 @@ def sanitize_for_llm(text: str, enabled: bool = True) -> tuple[str, list[dict]]:
     if not findings:
         return text, []
 
-    # Build redacted text by replacing matches in reverse order (preserve offsets)
-    redacted = text
+    # Build claim map: first pattern at each character position wins
+    claim = [None] * len(text)
+    for finding in findings:
+        for i in range(finding['start'], min(finding['end'], len(text))):
+            if claim[i] is None:
+                claim[i] = finding
+
+    # Walk text, build output
+    result = []
     log = []
-    # Deduplicate overlapping matches by tracking replaced ranges
-    replaced_ranges = []
-
-    for finding in reversed(findings):
-        start, end = finding['start'], finding['end']
-        # Skip if this range overlaps with an already-replaced range
-        if any(start < r[1] and end > r[0] for r in replaced_ranges):
-            continue
-        redacted = redacted[:start] + finding['placeholder'] + redacted[end:]
-        replaced_ranges.append((start, end))
-        log.append({
-            'label': finding['label'],
-            'placeholder': finding['placeholder'],
-            'original': finding['match'][:50],  # Truncate long matches in log
-        })
-
-    log.reverse()  # Return in text order
+    i = 0
+    while i < len(text):
+        if claim[i] is not None:
+            finding = claim[i]
+            if i == finding['start']:
+                result.append(finding['placeholder'])
+                log.append({
+                    'label': finding['label'],
+                    'placeholder': finding['placeholder'],
+                    'original': finding['match'][:50],
+                })
+            i = finding['end']
+        else:
+            result.append(text[i])
+            i += 1
 
     if log:
         summary = ', '.join(f"{l['label']}({l['placeholder']})" for l in log)
         logger.info("PII redacted: %s", summary)
 
-    return redacted, log
+    return ''.join(result), log
 
 
 def sanitize_messages(messages: list[dict], enabled: bool = True) -> tuple[list[dict], list[dict]]:
     """Sanitize all messages in a conversation before sending to LLM.
 
-    Handles both string content and list-of-content-blocks format (for multimodal).
+    Handles string content and list-of-content-blocks (multimodal).
 
-    Args:
-        messages: List of message dicts with 'role' and 'content'.
-        enabled: If False, return messages unchanged.
-
-    Returns:
-        Tuple of (sanitized_messages, combined_redaction_log).
+    Returns: (sanitized_messages, combined_redaction_log)
     """
     if not enabled or not messages:
         return messages, []
@@ -194,17 +181,13 @@ def sanitize_messages(messages: list[dict], enabled: bool = True) -> tuple[list[
 
     for msg in messages:
         content = msg.get('content', '')
-        role = msg.get('role', '')
 
         if isinstance(content, str):
             clean, redactions = sanitize_for_llm(content, enabled=True)
             if redactions:
                 all_redactions.extend(redactions)
-            sanitized_msg = dict(msg)
-            sanitized_msg['content'] = clean
-            sanitized.append(sanitized_msg)
+            sanitized.append({**msg, 'content': clean})
         elif isinstance(content, list):
-            # Multimodal content blocks — only sanitize text blocks
             clean_blocks = []
             for block in content:
                 if isinstance(block, dict) and block.get('type') == 'text':
