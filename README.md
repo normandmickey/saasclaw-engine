@@ -387,6 +387,75 @@ Git Bare Repos → Worktree Workspace → Deploy Pipeline → Nginx + SSL
 
 The engine handles all backend logic. You build the frontend — the wizard, file editor, project dashboard, settings — on top.
 
+## PII Protection
+
+The engine includes built-in PII detection and sanitization to prevent sensitive data from reaching LLM providers. This is critical for HR/payroll, healthcare, financial, and other data-sensitive use cases.
+
+### How It Works
+
+Every message sent to an LLM — user prompts, file contents from tool results, agent context — passes through the **PII Guard** (`saasclaw_engine.agent.pii_guard`) before reaching the provider.
+
+**Detection patterns:** SSNs, credit card numbers, phone numbers, email addresses, mailing addresses, bank routing/account numbers, dates of birth, passport numbers, driver's licenses, salary/compensation figures, database connection strings with embedded passwords, AWS access keys, and IP addresses.
+
+**Redaction:** Detected values are replaced with synthetic placeholders (`{{SSN}}`, `{{SALARY}}`, `{{EMAIL}}`, etc.) before the message reaches the LLM. The agent can still reason about structure and build correct code — it just never sees real data.
+
+**Logging:** Every redaction is logged at `WARNING` level with the count and pattern types:
+```
+WARNING PII redacted 3 pattern(s) before LLM call in round 2
+WARNING PII redacted 5 pattern(s) from PiBridge message
+```
+This gives you an audit trail without logging the actual sensitive values.
+
+### LLM Gateway Mode
+
+For projects that require data never leave your infrastructure, enable **LLM Gateway mode** on the project. This forces all agent requests through a local/self-hosted LLM endpoint (vLLM, Ollama, LM Studio) and blocks cloud providers entirely.
+
+**Configuration:**
+```python
+# settings.py
+LLM_GATEWAY_URL = 'http://your-vllm-server:8080/v1'  # OpenAI-compatible endpoint
+LLM_GATEWAY_MODEL = 'meta-llama/Llama-3.1-70B-Instruct'  # or leave empty to use default
+LLM_GATEWAY_BLOCKED_PROVIDERS = ['zai', 'openai', 'anthropic', 'google', 'mistral', 'groq']
+```
+
+**Per-project toggle:** Staff users can enable `require_gateway` on individual projects. When enabled:
+1. Cloud providers in the blocked list are overridden to `local`
+2. The LLM base URL is set to `LLM_GATEWAY_URL`
+3. PII Guard still runs as defense-in-depth
+4. Data never leaves your server
+
+### Defense in Depth
+
+The engine applies multiple layers of protection:
+
+| Layer | What it does | Always active? |
+|-------|-------------|---------------|
+| **PII Guard** | Detects and redacts sensitive patterns in LLM messages | Yes, every LLM call |
+| **LLM Gateway** | Routes requests to local LLM, blocks cloud providers | Per-project toggle |
+| **Audit logging** | Logs redaction counts and pattern types | Yes, every redaction |
+
+PII Guard runs regardless of gateway mode — even when using cloud providers, sensitive patterns are redacted. Gateway mode adds the infrastructure-level guarantee that data never leaves your network.
+
+### What's Not Covered
+
+- **Pi subprocess internal calls**: Pi (the external agent process) reads files and sends them to its own LLM internally. The PiBridge sanitizes messages *before* they reach Pi, but Pi's internal tool calls are not covered by PII Guard. Use gateway mode to ensure Pi's LLM calls also stay local.
+- **Deployed application data**: PII Guard protects the *build process*. Data in the apps users build (user databases, runtime PII) is the application's own responsibility.
+- **Images/screenshots**: PII Guard is text-only. Image-based PII (screenshots with SSNs, photos of documents) is not detected.
+
+### Extending PII Guard
+
+To add custom patterns, edit `saasclaw_engine/agent/pii_guard.py` and add to the `PATTERNS` list:
+
+```python
+PATTERNS.append((
+    re.compile(r'your-custom-pattern-here'),
+    '{{CUSTOM}}',
+    'Custom Label'
+))
+```
+
+See [docs/PII-PROTECTION.md](docs/PII-PROTECTION.md) for the full guide.
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
