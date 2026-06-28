@@ -141,6 +141,9 @@ Then point `LLM_GATEWAY_URL` to `http://<vllm-ip>:8080/v1`.
 | Images/screenshots | ❌ Not covered | PII Guard is text-only. Visual PII (photos of documents, screenshots with SSNs) is not detected. |
 | Deployed app runtime data | ❌ Out of scope | PII Guard protects the build process. Data in user-built apps is the application's responsibility. |
 | Streaming LLM responses | ✅ Covered | Sanitization happens before the call; LLM responses are not re-scanned (they contain placeholders, not real data). |
+| Pi subprocess internal LLM calls | ✅ **Now covered** | Pi extension (`pii-guard.ts`) intercepts the `context` and `tool_result` events inside Pi, sanitizing all messages before Pi's internal LLM calls. |
+| Images/screenshots | ❌ Not covered | PII Guard is text-only. Visual PII is not detected. |
+| Deployed app runtime data | ❌ Out of scope | Data in user-built apps is the application's own responsibility. |
 
 ---
 
@@ -158,6 +161,29 @@ PATTERNS.append((
 ))
 ```
 
+For the Pi extension, edit `extensions/pii-guard.ts` and add to the `PATTERNS` array.
+
+### Pi Extension (Full Pi Coverage)
+
+Pi has its own internal LLM call path that the engine's PII Guard can't reach directly. The Pi extension (`extensions/pii-guard.ts`) covers this by:
+
+1. Intercepting the `context` event — fires before **every** LLM call inside Pi
+2. Intercepting the `tool_result` event — sanitizes tool output as it returns
+3. Logging all redactions to stderr and `/var/log/saasclaw/pii-guard.log`
+
+**Install:** Copy to `~/.pi/agent/extensions/pii-guard.ts` (auto-discovered globally).
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp extensions/pii-guard.ts ~/.pi/agent/extensions/pii-guard.ts
+```
+
+**Verify:**
+```bash
+pi -p --no-extensions "Read employees.json"  # PII visible
+pi -p "Read employees.json"                    # PII redacted
+```
+
 ### Disabling PII Guard
 
 To disable PII Guard entirely (not recommended), call the functions with `enabled=False`:
@@ -166,7 +192,7 @@ To disable PII Guard entirely (not recommended), call the functions with `enable
 messages, redactions = sanitize_messages(messages, enabled=False)
 ```
 
-Or modify the runner/pii_bridge imports to use a no-op.
+Or remove the Pi extension file.
 
 ---
 
