@@ -139,6 +139,143 @@ celery -A myapp beat -l info
 
 ---
 
+## Production Deployment
+
+### Systemd Services
+
+Create two service files for Gunicorn (web) and Celery (worker). These use your app's virtual environment and environment file.
+
+**`/etc/systemd/system/saasclaw-web.service`:**
+
+```ini
+[Unit]
+Description=SaaSClaw Gunicorn
+After=network.target postgresql.service redis-server.service
+
+[Service]
+User=saasclaw
+Group=saasclaw
+WorkingDirectory=/srv/saasclaw/app
+EnvironmentFile=/srv/saasclaw/app/.env
+ExecStart=/srv/saasclaw/app/.venv/bin/gunicorn config.wsgi:application \
+    --bind 127.0.0.1:8000 --workers 2 --threads 4 \
+    --timeout 600 \
+    --access-logfile /srv/saasclaw/logs/gunicorn-access.log \
+    --error-logfile /srv/saasclaw/logs/gunicorn-error.log
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/systemd/system/saasclaw-worker.service`:**
+
+```ini
+[Unit]
+Description=SaaSClaw Celery Worker
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+User=saasclaw
+Group=saasclaw
+WorkingDirectory=/srv/saasclaw/app
+EnvironmentFile=/srv/saasclaw/app/.env
+Environment=HOME=/srv/saasclaw
+Environment=NPM_CONFIG_CACHE=/srv/saasclaw/.npm
+ExecStart=/srv/saasclaw/app/.venv/bin/celery -A config worker -l info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable saasclaw-web saasclaw-worker
+sudo systemctl start saasclaw-web saasclaw-worker
+```
+
+> **Important:** After code changes, use `sudo systemctl restart saasclaw-web saasclaw-worker`. For module-level changes (like new Django apps or migrations), do a full stop/start: `sudo systemctl stop saasclaw-web saasclaw-worker && sudo systemctl start saasclaw-web saasclaw-worker`.
+
+### Nginx Reverse Proxy
+
+The web service listens on `127.0.0.1:8000`. Configure nginx to proxy to it:
+
+```nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name saasclaw.ai;
+
+    ssl_certificate     /etc/letsencrypt/live/saasclaw.ai/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/saasclaw.ai/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Static files (serve directly)
+    location /static/ {
+        alias /srv/saasclaw/app/static/;
+        expires 30d;
+    }
+
+    # Docs
+    location /docs/ {
+        alias /srv/saasclaw/app/docs/;
+    }
+
+    # All other requests → Gunicorn
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+}
+```
+
+### Required Directories
+
+```bash
+sudo mkdir -p /srv/saasclaw/{app,engine,logs}
+sudo useradd -r -d /srv/saasclaw -s /usr/sbin/nologin saasclaw
+sudo chown -R saasclaw:saasclaw /srv/saasclaw
+```
+
+### Environment File
+
+Create `/srv/saasclaw/app/.env` with your settings (see [Configuration](#configuration) above). Key variables:
+
+```env
+SECRET_KEY=your-django-secret-key
+DATABASE_URL=postgres://user:pass@localhost/saasclaw
+CELERY_BROKER_URL=redis://localhost:6379/0
+REDIS_URL=redis://localhost:6379/0
+STUDIO_MODEL=glm-5.2
+ALLOWED_HOSTS=saasclaw.ai,app.saasclaw.ai
+```
+
+### Pi Extension (PII Guard)
+
+If using the PII Guard extension for Pi-based agents:
+
+```bash
+sudo mkdir -p ~saasclaw/.pi/agent/extensions
+sudo cp /srv/saasclaw/engine/extensions/pii-guard.ts ~saasclaw/.pi/agent/extensions/
+sudo chown -R saasclaw:saasclaw ~saasclaw/.pi
+```
+
+---
+
 ## DNS & SSL
 
 The deploy pipeline automatically generates nginx configs for each project. It needs DNS records pointing to your server and SSL certificates for every domain it serves.
