@@ -13,6 +13,11 @@ SaaSClaw Engine is the backend that powers [SaaSClaw](https://saasclaw.ai). It p
 - **GitHub Integration** — Clone, commit, and push to user repos via a GitHub App (JWT auth + installation tokens)
 - **Task Queue** — Async Celery workers for long-running deploy jobs
 - **API Key Management** — Encrypted storage for user-provided LLM provider keys
+- **Risk Tier Classification** — Automatic Low/Medium/High/Critical risk assignment based on data sensitivity
+- **Secret Scanning** — Deploy pipeline detects AWS keys, GitHub tokens, private keys, and other secrets in committed code
+- **Dependency Scanning** — Automated vulnerability scanning (`npm audit`, `pip check`) during deploy
+- **Decommissioning** — Safe project decommissioning with systemd cleanup, nginx removal, and audit logging
+- **Staging Support** — Configurable preview domains for staging isolation (`PREVIEW_BASE_DOMAIN`)
 
 ## Install
 
@@ -460,6 +465,15 @@ deploy_preview(project, user, log_file)
 deploy_production(project, environment, user, log_file)
 ```
 
+### Decommissioning
+
+```python
+from saasclaw_engine.deployments.service import decommission_project
+
+# Safely decommission a project — stops services, removes nginx, logs actions
+decommission_project(project_slug, project_name)
+```
+
 ### Agent System
 
 ```python
@@ -501,10 +515,10 @@ commit_and_push_repo(project, message="Add new feature", token=token)
 | Package | Description |
 |---------|-------------|
 | `saasclaw_engine.agent` | Pi Bridge (RPC agent), fallback runner, and agent tools (file I/O, bash, git, web, todos) |
-| `saasclaw_engine.deployments` | Models (Project, Environment, Deployment, Domain, EnvVar), deploy pipeline, nginx config generation |
+| `saasclaw_engine.deployments` | Models (Project, Environment, Deployment, Domain, EnvVar), deploy pipeline with secret/dependency scanning, nginx config generation, project decommissioning |
 | `saasclaw_engine.integrations` | GitHub App auth, repo clone/push, webhook handling |
 | `saasclaw_engine.agents` | Celery task models and async task execution |
-| `saasclaw_engine.projects` | Project model with framework, runtime, and config fields |
+| `saasclaw_engine.projects` | Project model with framework, runtime, risk tier, and config fields; ProjectSubmission with AI disclosure tracking |
 | `saasclaw_engine.studio_models` | AgentSession, ProviderKey, Workspace, Todo, TokenUsage models |
 | `saasclaw_engine.help_search` | RAG-based help search using ChromaDB |
 
