@@ -897,7 +897,7 @@ def _detect_output_dir(repo_path: Path, build_cmd: str = '') -> str:
         cfg = repo_path / cfg_name
         if cfg.exists():
             content = cfg.read_text(encoding='utf-8', errors='replace')
-            m = _re.search(r'build\s*:\s*\{[^}]*outDir\s*:\s*[\'"]([^\'"]+)', content)
+            m = _re.search(r"outDir\s*:\s*['\"`]([^'\"`]+)", content)
             if m:
                 return m.group(1).strip()
             # Vite default
