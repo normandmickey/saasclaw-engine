@@ -162,7 +162,7 @@ def _refresh_repo_checkout_for_deploy(project: Project, repo_path: Path, log_fil
                 project.repo_default_branch or 'main', str(repo_path),
             )
         elif project.repo_url:
-            _run_command(f'git clone {project.repo_url} {repo_path}', None, log_file)
+            _run_command(f'git clone {project.repo_url} {repo_path}', repo_path.parent, log_file)
     else:
         _assert_repo_binding(project, repo_path)
         branch = project.repo_default_branch or 'main'
