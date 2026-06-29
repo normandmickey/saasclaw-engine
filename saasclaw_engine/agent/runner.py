@@ -227,6 +227,59 @@ def _strip_permission_question(text: str, has_tool_calls: bool) -> str:
     return result
 
 
+def _compact_conversation(conversation: list[dict], keep_recent: int = 4) -> list[dict]:
+    """Compact older messages in conversation history to reduce LLM context size.
+
+    Keeps the most recent ``keep_recent`` tool-result exchanges at full fidelity.
+    Older tool results are replaced with a one-line summary (tool name + char count).
+    Older assistant messages are truncated to ~100 chars.
+    """
+    if len(conversation) <= keep_recent * 2:
+        return conversation
+
+    # Identify indices that belong to recent turns (count from the end)
+    # A "turn" is roughly: assistant + tool. We want to keep the last keep_recent
+    # tool messages and everything after them intact.
+    tool_indices = [i for i, m in enumerate(conversation) if m.get("role") == "tool"]
+    if len(tool_indices) <= keep_recent:
+        return conversation
+
+    cutoff_idx = tool_indices[-keep_recent]
+
+    compacted = []
+    for i, msg in enumerate(conversation):
+        if i >= cutoff_idx:
+            compacted.append(msg)
+            continue
+
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+
+        if role == "tool":
+            # Summarise old tool results
+            tc = msg.get("tool_call") or {}
+            tool_name = tc.get("name", "tool") if isinstance(tc, dict) else "tool"
+            char_count = len(content)
+            summary = f"[{tool_name} result - {char_count:,} chars]"
+            new_msg = dict(msg)
+            new_msg["content"] = summary
+            compacted.append(new_msg)
+        elif role == "assistant":
+            # Truncate old assistant transition text
+            if len(content) > 100:
+                new_msg = dict(msg)
+                new_msg["content"] = content[:100] + "…"
+                compacted.append(new_msg)
+            else:
+                compacted.append(msg)
+        else:
+            compacted.append(msg)
+
+    return compacted
+
+
 def _system_prompt(workspace_path: str, project_name: str, project_notes: str = '', project_directives: str = '', profile_prompt: str = '', allowed_tools: list = None, project_todos: list = None, project_context: str = '') -> str:
     """Build the system prompt for the coding agent."""
     # Detect project type and key conventions
@@ -1334,7 +1387,7 @@ def run_agent(
     """
     system = {"role": "system", "content": _system_prompt(workspace_path, project_name, project_notes, project_directives, profile_prompt, profile_tools, project_todos=project_todos, project_context=project_context)}
     messages = [system]
-    messages.extend(conversation)
+    messages.extend(_compact_conversation(conversation))
 
     # Build user message with optional images
     if images:
