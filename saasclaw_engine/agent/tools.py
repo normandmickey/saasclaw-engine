@@ -97,23 +97,94 @@ def read_file(workspace_path: str, path: str, start_line: int = 0, end_line: int
         return f"Error reading file: {exc}"
 
 
-def _file_size_warning(path: str, line_count: int) -> str:
-    """Generate a warning if a file exceeds recommended size limits."""
+def _load_saasclaw_config(workspace_path: str) -> dict:
+    """Load .saasclaw project config if it exists."""
+    import json as _json
+    config_path = os.path.join(workspace_path, ".saasclaw")
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path) as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+
+def _match_glob(pattern: str, path: str) -> bool:
+    """Simple glob matcher supporting ** and *."""
+    import fnmatch
+    # Normalize path separators
+    path = path.replace("\\", "/")
+    pattern = pattern.replace("\\", "/")
+    # fnmatch doesn't handle ** well, so do a two-pass approach
+    if "**" in pattern:
+        # Convert ** to match any number of path segments
+        # Split on ** and match segments
+        parts = pattern.split("**")
+        if len(parts) == 2:
+            prefix, suffix = parts
+            prefix = prefix.rstrip("/")
+            suffix = suffix.lstrip("/")
+            if prefix and not path.startswith(prefix + "/"):
+                return False
+            if suffix and not fnmatch.fnmatch(path.split("/")[-1] if "/" not in path else path, "*" + suffix):
+                # Check if any suffix matches
+                if not any(fnmatch.fnmatch(p, suffix) for p in path.split("/")):
+                    return False
+            return True
+    return fnmatch.fnmatch(path, pattern)
+
+
+def _file_size_warning(path: str, line_count: int, workspace_path: str = None) -> str:
+    """Generate a warning or block based on .saasclaw config or defaults."""
+    config = _load_saasclaw_config(workspace_path) if workspace_path else {}
+    file_limits = config.get("file_limits", {})
+    enforce = config.get("enforce", "warn")
+
+    # Find matching limit
+    limit = None
+    matched_pattern = None
+    for pattern, lim in file_limits.items():
+        if pattern == "default":
+            if limit is None:
+                limit = lim
+                matched_pattern = pattern
+            continue
+        if _match_glob(pattern, path):
+            limit = lim
+            matched_pattern = pattern
+            break  # First match wins (config ordering)
+
+    if limit is None:
+        limit = file_limits.get("default", 500)
+
+    if line_count <= limit:
+        return ""
+
+    # Build the message
     basename = os.path.basename(path)
-    if basename in ("page.tsx", "page.jsx") and line_count > 150:
-        return (
-            f"\n\n⚠️ WARNING: '{path}' is now {line_count} lines (limit: 150). "
-            f"This is a monolithic file. You MUST extract logic into hooks/ and lib/ modules. "
-            f"Create a custom hook in src/hooks/ for the feature you just added, move the state and handlers there, "
-            f"and keep page.tsx as a thin shell that imports and dispatches to hooks. "
-            f"DO NOT add any more code to this file without refactoring first."
+    is_page = basename in ("page.tsx", "page.jsx")
+
+    if is_page:
+        msg = (
+            f"\n\n🚫 BLOCKED: '{path}' is now {line_count} lines (limit: {limit}, matched: '{matched_pattern}'). "
+            f"page.tsx MUST stay under {limit} lines. Extract your new code into a custom hook:\n"
+            f"  1. Create src/hooks/use<Name>.ts with the state and handlers\n"
+            f"  2. Create src/lib/<name>.ts with pure game logic (if not already done)\n"
+            f"  3. In page.tsx: import the hook and add a thin dispatch case\n"
+            f"Do NOT add more code to {path}. Create the hook file instead."
         )
-    if line_count > 500:
-        return (
-            f"\n\n⚠️ WARNING: '{path}' is now {line_count} lines (limit: 500). "
+    else:
+        msg = (
+            f"\n\n🚫 BLOCKED: '{path}' is now {line_count} lines (limit: {limit}, matched: '{matched_pattern}'). "
             f"Split this file into smaller modules before adding more code."
         )
-    return ""
+
+    if enforce == "block":
+        return msg + "\n\nERROR: File exceeds size limit. Write was REJECTED. Refactor and try again."
+    else:
+        return msg.replace("🚫 BLOCKED", "⚠️ WARNING")
+
 
 
 def write_file(workspace_path: str, path: str, content: str) -> str:
@@ -157,12 +228,16 @@ def write_file(workspace_path: str, path: str, content: str) -> str:
     if os.path.isdir(full):
         return f"Error: '{path}' is a directory, not a file. Specify a file path like '{path}/index.html'."
     os.makedirs(os.path.dirname(full), exist_ok=True)
+    # Check file size limit BEFORE writing (block mode)
+    line_count = content.count('\n') + 1
+    size_check = _file_size_warning(path, line_count, workspace_path)
+    if "ERROR: File exceeds size limit" in size_check:
+        return f"Error writing {path}: file would be {line_count} lines, exceeding the configured limit.{size_check}"
+
     try:
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        line_count = content.count('\n') + 1
-        warning = _file_size_warning(path, line_count)
-        return f"Wrote {len(content)} bytes to {path}{warning}"
+        return f"Wrote {len(content)} bytes to {path}{size_check}"
     except Exception as exc:
         return f"Error writing file: {exc}"
 
@@ -208,11 +283,15 @@ def replace_in_file(workspace_path: str, path: str, edits: list) -> str:
             content = content.replace(search, replace, count if count == 1 else 1)
             results.append(f"  Edit {i+1}: applied ({count} match{'es' if count > 1 else ''})")
 
+    # Check file size limit BEFORE writing (block mode)
+    line_count = content.count('\n') + 1
+    warning = _file_size_warning(path, line_count, workspace_path)
+    if "ERROR: File exceeds size limit" in warning:
+        return f"Error editing {path}: file would be {line_count} lines, exceeding the configured limit.{warning}"
+
     try:
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        line_count = content.count('\n') + 1
-        warning = _file_size_warning(path, line_count)
         return f"Edited {path}:\n" + "\n".join(results) + warning
     except Exception as exc:
         return f"Error writing file: {exc}"
