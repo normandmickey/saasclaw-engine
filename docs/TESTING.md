@@ -41,6 +41,7 @@ Tests use SQLite (no real database needed) and mock external services. Every tes
 |------|-------|--------|
 | `test_pii_guard.py` | 102 | PII pattern detection (SSN, email, phone, credit card, API keys), redaction, edge cases, multi-format inputs |
 | `test_saasclaw_config.py` | 13 | `.saasclaw` config file loading (file-based, directory-based, `.saasclaw/config.json`), invalid JSON, glob pattern matching |
+| `test_prompt_guard.py` | 24 | Prompt injection detection: clean input, injection patterns, Unicode evasion, multimodal scanning, audit logging, graceful degradation |
 | `test_pi_bridge.py` | 18 | Provider interface bridge between runner and LLM APIs |
 
 ### Deployments (`deployments/tests/`)
@@ -73,7 +74,7 @@ Tests use SQLite (no real database needed) and mock external services. Every tes
 
 ## Totals
 
-**365 tests passing** across 16 test files.
+**389 tests passing** across 17 test files.
 
 ## Writing New Tests
 

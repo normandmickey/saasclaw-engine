@@ -72,6 +72,17 @@ This document maps SaaSClaw Engine's technical controls to the [NIST AI RMF 1.0]
 | Regex-based detection | All PII patterns use documented regex — no ML-based inference on user data |
 | Multi-format support | Handles SSN dashes, spaces, no separators; credit card with/without spaces; phone in multiple formats |
 
+### MAP 2.4: Prompt Injection Defense
+
+| Control | Implementation |
+|---------|---------------|
+| Input scanning | `prompt_guard.scan_user_input()` scans all user text before sending to LLM providers |
+| Multi-modal scanning | `prompt_guard.scan_multimodal_content()` scans text + images via OCR |
+| 1094 detection patterns | Uses [sunglasses](https://github.com/sunglasses-dev/sunglasses) library: 65 attack categories, 23 languages |
+| Unicode evasion detection | Catches zero-width characters, RTL obfuscation, homoglyph substitution, Base64-encoded attacks |
+| Dual-layer defense | Scan at wizard endpoint (422 rejection) AND in agent runner (fallback block) |
+| Audit logging | Blocked attempts logged to `/srv/saasclaw/logs/prompt-guard.log` with timestamp, source, severity, findings |
+
 ---
 
 ## MEASURE — Analyzing, Assessing, and Tracking AI Risk
@@ -154,6 +165,7 @@ All governance controls are configurable via `SiteSettings` (singleton model, ad
 - **Secret scanner operates on committed code** — does not scan environment variables or runtime secrets
 - **Dependency scanning uses upstream audit tools** — accuracy depends on npm/pip vulnerability database freshness
 - **AI RMF mapping is self-assessed** — not independently audited
+- **Prompt injection scanning is rule-based** — may miss novel attacks not matching known patterns (sunglasses updates regularly)
 
 ---
 

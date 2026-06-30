@@ -1503,6 +1503,15 @@ def run_agent(
                 "type": "image_url",
                 "image_url": {"url": f"data:{img.get('mime', 'image/png')};base64,{img['data']}"},
             })
+
+        # Scan multimodal content for prompt injection
+        from saasclaw_engine.agent.prompt_guard import scan_multimodal_content
+        scan = scan_multimodal_content(user_message, images, source=f"runner:{project_name}")
+        if not scan["allowed"]:
+            logger.warning("Prompt injection blocked in run_agent for project %s (severity=%s)",
+                           project_name, scan["severity"])
+            return [{"role": "assistant", "content": f"I detected potentially unsafe input and can't process that request. If you believe this is an error, try rephrasing your message.", "tool_call": {}}]
+
         messages.append({"role": "user", "content": user_content})
     else:
         messages.append({"role": "user", "content": user_message})
