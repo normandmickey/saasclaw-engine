@@ -695,8 +695,34 @@ The engine applies multiple layers of protection:
 | Layer | What it does | Always active? |
 |-------|-------------|---------------|
 | **PII Guard** | Detects and redacts sensitive patterns in LLM messages | Yes, every LLM call |
+| **Prompt Injection Guard** | Scans user input for injection patterns before LLM calls | Yes, every message |
 | **LLM Gateway** | Routes requests to local LLM, blocks cloud providers | Per-project toggle |
-| **Audit logging** | Logs redaction counts and pattern types | Yes, every redaction |
+| **Audit logging** | Logs redaction counts, injection blocks, and pattern types | Yes |
+
+## Prompt Injection Defense
+
+All user input to the wizard and agent runner is scanned for prompt injection attempts using the [sunglasses](https://github.com/sunglasses-dev/sunglasses) library (1094 patterns, 65 attack categories, 23 languages).
+
+### How It Works
+
+A dual-layer defense scans every message:
+
+1. **Wizard endpoint** — user input is scanned before reaching the agent. Blocked input returns HTTP 422 with severity and findings.
+2. **Agent runner** — `run_agent()` scans again as a fallback, catching anything that bypasses the endpoint.
+
+**Detection capabilities:**
+- Direct instruction override ("ignore all previous instructions")
+- Role-play attacks (DAN, persona switching)
+- System prompt extraction attempts
+- Unicode evasion (zero-width characters, RTL override, homoglyphs)
+- Base64-encoded attacks
+- Multimodal scanning (OCR on uploaded images)
+
+**Performance:** <3ms per scan, zero GPU required.
+
+**Audit trail:** Blocked attempts are logged to `/srv/saasclaw/logs/prompt-guard.log` with timestamp, source project, severity, and matched patterns.
+
+**Graceful degradation:** If sunglasses is not installed, all input is allowed (with a log warning).
 
 PII Guard runs regardless of gateway mode — even when using cloud providers, sensitive patterns are redacted. Gateway mode adds the infrastructure-level guarantee that data never leaves your network.
 
