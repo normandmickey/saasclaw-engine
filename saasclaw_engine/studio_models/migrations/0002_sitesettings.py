@@ -2,6 +2,21 @@ from django.db import migrations, models
 import django.utils.timezone
 
 
+def _create_default_settings(apps, schema_editor):
+    SiteSettings = apps.get_model('studio_models', 'SiteSettings')
+    if not SiteSettings.objects.filter(id=1).exists():
+        SiteSettings.objects.create(
+            id=1,
+            project_approval_required=False,
+            secret_scan_enabled=True,
+            dependency_scan_enabled=True,
+            block_deploy_on_findings=False,
+            default_require_gateway=False,
+            ai_disclosure_required=True,
+            pii_guard_enabled=True,
+        )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -28,8 +43,5 @@ class Migration(migrations.Migration):
                 'verbose_name_plural': 'Site Settings',
             },
         ),
-        migrations.RunSQL(
-            sql="INSERT INTO studio_models_sitesettings (id, project_approval_required, secret_scan_enabled, dependency_scan_enabled, block_deploy_on_findings, default_require_gateway, ai_disclosure_required, pii_guard_enabled, updated_at) VALUES (1, false, true, true, false, false, true, true, NOW()) ON CONFLICT DO NOTHING;",
-            reverse_sql="",
-        ),
+        migrations.RunPython(_create_default_settings, migrations.RunPython.noop),
     ]

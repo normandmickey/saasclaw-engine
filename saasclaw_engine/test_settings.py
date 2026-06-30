@@ -12,6 +12,7 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'saasclaw_engine.projects',
+    'saasclaw_engine.studio_models',
     'saasclaw_engine.agents',
     'saasclaw_engine.integrations',
     'saasclaw_engine.deployments',
