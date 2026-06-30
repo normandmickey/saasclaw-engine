@@ -581,7 +581,7 @@ def _deploy_django_environment(project: Project, environment: Environment, deplo
         'POSTGRES_PASSWORD': db_password,
         'POSTGRES_HOST': existing_env.get('POSTGRES_HOST') or '127.0.0.1',
         'POSTGRES_PORT': existing_env.get('POSTGRES_PORT') or '5432',
-        'DATABASE_URL': f'postgresql://{db_user}:{db_password}@{existing_env.get("POSTGRES_HOST") or "127.0.0.1"}:{existing_env.get("POSTGRES_PORT") or "5432"}/{db_name}',
+        'DATABASE_URL': f'postgresql+psycopg://{db_user}:{db_password}@{existing_env.get("POSTGRES_HOST") or "127.0.0.1"}:{existing_env.get("POSTGRES_PORT") or "5432"}/{db_name}',
     })
     # Merge user-defined environment variables (override defaults)
     from saasclaw_engine.deployments.models import EnvironmentVariable
@@ -1161,7 +1161,7 @@ def _deploy_node_ssr_environment(project: Project, environment: Environment, dep
     _ensure_postgres_database(db_name, db_user, db_password, log_file)
 
     # Standard DATABASE_URL for Node ORMs (Prisma, Drizzle, Knex, Sequelize, etc.)
-    database_url = f'postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
+    database_url = f'postgresql+psycopg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
     env_lines = [
         f'PORT={port}',
         f'NODE_ENV=production',
@@ -1278,7 +1278,7 @@ def _deploy_dotnet_environment(project: Project, environment: Environment, deplo
 
     _ensure_postgres_database(db_name, db_user, db_password, log_file)
 
-    database_url = f'postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
+    database_url = f'postgresql+psycopg://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
 
     # Build app settings / env vars
     env_values = dict(existing_env)
