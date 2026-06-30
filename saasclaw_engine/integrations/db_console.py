@@ -10,6 +10,7 @@ from pathlib import Path
 import psycopg
 from django.conf import settings
 from django.http import JsonResponse, HttpResponseBadRequest, HttpResponseForbidden
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from saasclaw_engine.deployments.service import _load_env_file
@@ -208,6 +209,7 @@ def db_table_detail(request, slug, env, table):
         conn.close()
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def db_query(request, slug, env):
     """Run a SQL query against the project database. Read-only by default."""
