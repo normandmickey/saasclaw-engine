@@ -101,13 +101,21 @@ def _load_saasclaw_config(workspace_path: str) -> dict:
     """Load .saasclaw project config if it exists."""
     import json as _json
     config_path = os.path.join(workspace_path, ".saasclaw")
-    if not os.path.isfile(config_path):
-        return {}
-    try:
-        with open(config_path) as f:
-            return _json.load(f)
-    except Exception:
-        return {}
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path) as f:
+                return _json.load(f)
+        except Exception:
+            return {}
+    # Also check for .saasclaw/config.json (directory-based projects)
+    dir_config = os.path.join(workspace_path, ".saasclaw", "config.json")
+    if os.path.isfile(dir_config):
+        try:
+            with open(dir_config) as f:
+                return _json.load(f)
+        except Exception:
+            return {}
+    return {}
 
 
 def _match_glob(pattern: str, path: str) -> bool:
