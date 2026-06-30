@@ -720,6 +720,16 @@ PATTERNS.append((
 
 See [docs/PII-PROTECTION.md](docs/PII-PROTECTION.md) for the full guide.
 
+## Testing
+
+365 tests across 16 test files. See [docs/TESTING.md](docs/TESTING.md) for the full guide.
+
+```bash
+python3 -m pytest           # run all
+python3 -m pytest -v        # verbose
+python3 -m pytest -k "form"  # filter by name
+```
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
