@@ -1,10 +1,8 @@
 """
 PII detection and sanitization for the SaaSClaw agent.
 
-Scans text content before it reaches the LLM and redacts sensitive patterns
-(SSNs, credit cards, phone numbers, emails, addresses, financial data, etc.).
-Replaces detected values with synthetic placeholders so the agent can still
-reason about structure without exposing real data.
+Uses the PII Guard microservice (Presidio) when available, falling back
+to built-in regex patterns when the service is unreachable.
 
 Usage:
     from saasclaw_engine.agent.pii_guard import sanitize_for_llm
@@ -14,29 +12,65 @@ Usage:
     # redaction_log tracks what was redacted (for audit/display)
 """
 
-import re
 import logging
+import os
+import re
+from typing import Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
-# ── Patterns ──────────────────────────────────────────────────────────────
-# ORDER MATTERS: first match at a position wins. Put specific patterns first.
+# ── Service config ───────────────────────────────────────────────────────
+
+_SERVICE_URL = os.getenv("PII_GUARD_URL", "http://127.0.0.1:8900")
+_TIMEOUT_S = float(os.getenv("PII_GUARD_TIMEOUT", "2.0"))
+_client: Optional[httpx.Client] = None
+
+
+def _get_client() -> Optional[httpx.Client]:
+    """Lazy-init an HTTP client to the PII Guard service."""
+    global _client
+    if _client is None:
+        try:
+            _client = httpx.Client(base_url=_SERVICE_URL, timeout=_TIMEOUT_S)
+            # Quick health check
+            resp = _client.get("/health")
+            resp.raise_for_status()
+            logger.info("PII Guard service connected at %s", _SERVICE_URL)
+        except Exception as e:
+            logger.warning("PII Guard service unavailable at %s: %s — using regex fallback", _SERVICE_URL, e)
+            _client = None
+    return _client
+
+
+def _service_healthy() -> bool:
+    """Check if the service is reachable (no exception = healthy)."""
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        resp = client.get("/health", timeout=1.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+# ── Regex fallback (legacy patterns) ──────────────────────────────────────
+# Used when the PII Guard service is unavailable.
 
 PATTERNS = [
-    # 1. Database connection strings (must run before email — email steals passwords)
-    #    Handles empty username: redis://:password@localhost:6379/0
+    # 1. Database connection strings
     (re.compile(
         r'(?i)\b(?:mysql|postgres(?:ql)?|mongodb|redis)://(?:[\w._-]+(?::[^\s@]+)?|:[^\s@]+)@[\w.-]+(?::\d+)?(?:/[\w./-]*)?'
     ), '{{DB_CONN}}', 'Database Connection'),
 
-    # 2. US Social Security Numbers: 123-45-6789, 123 45 6789, 123456789
-    #    Valid areas: 001-899 (excludes 000, 666)
-    #    Valid groups: 01-99 (excludes 00), serials: 0001-9999 (excludes 0000)
+    # 2. US Social Security Numbers
     (re.compile(
         r'(?<!\d)(?!000|666)\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}(?!\d)'
     ), '{{SSN}}', 'SSN'),
 
-    # 3. Credit card numbers (Visa, MC, Amex, Discover)
+    # 3. Credit card numbers
     (re.compile(
         r'(?<!\d)(?:4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'
         r'|5[1-5]\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}'
@@ -49,43 +83,42 @@ PATTERNS = [
         r'(?<!\d)\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)'
     ), '({{PHONE}})', 'Phone'),
 
-    # 5. Email addresses (excludes localhost)
+    # 5. Email addresses
     (re.compile(
         r'\b[A-Za-z0-9._%+-]+@(?!localhost\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
     ), '{{EMAIL}}', 'Email'),
 
-    # 6. US mailing addresses (street + city/state/zip)
+    # 6. US mailing addresses
     (re.compile(
         r'\b\d+\s+[A-Za-z0-9\s,.]+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Dr|Drive|Ln|Lane|Rd|Road|Ct|Court|Pl|Place|Way|#\d+)\s*,\s*[A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b'
     ), '{{ADDRESS}}', 'Address'),
 
-    # 7. Bank routing numbers (context keyword required)
+    # 7. Bank routing numbers
     (re.compile(
         r'(?i)\b(?:routing|aba|bank[_\s-]*routing)[_\s-]*(?:number|no\.?|#)?[\s"]*:?[\s"]*\d{9}\b'
     ), '{{ROUTING}}', 'Bank Routing'),
 
-    # 8. Bank account numbers (context keyword required)
-    #    Handles JSON: "account": "1234567890123456"
+    # 8. Bank account numbers
     (re.compile(
         r'(?i)\b(?:account[_\s-]*(?:number|no\.?|#)?)[\s"]*:?\s*"?\d{8,17}\b'
     ), '{{ACCT}}', 'Bank Account'),
 
-    # 9. Salary / compensation (context keyword required)
+    # 9. Salary / compensation
     (re.compile(
         r'(?i)\b(?:salary|annual[_\s-]*salary|base[_\s-]*pay|compensation|hourly[_\s-]*rate|wage|pay[_\s-]*rate)[\s"]*:?\s*"?[\$]?[\d,]+(?:\.\d{2})?(?:\s*(?:per\s*)?(?:year|annum|month|hour|hr))?\b'
     ), '{{SALARY}}', 'Salary'),
 
-    # 10. Dates of birth (context keyword required)
+    # 10. Dates of birth
     (re.compile(
         r'(?i)(?:date[_\s-]*of[_\s-]*birth|dob|born(?:\s+on)?|birth[_\s-]?date|birthday)[\s":,]*\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}'
     ), '{{DOB}}', 'Date of Birth'),
 
-    # 11. Passport numbers (context keyword required)
+    # 11. Passport numbers
     (re.compile(
         r'(?i)\b(?:passport[_\s-]?(?:number|no\.?|#|id)?)[\s"]*:?\s*"?[A-Z]?\d{8,9}\b'
     ), '{{PASSPORT}}', 'Passport'),
 
-    # 12. Driver's license numbers (context keyword required)
+    # 12. Driver's license numbers
     (re.compile(
         r"""(?i)\b(?:driver(?:'s|\\')?\s*(?:license|lic(?:ense)?)\s*(?:number|no\.?#)?)\s*:?\s*[A-Z]?\d{7,13}\b"""
     ), '{{DL}}', 'Driver License'),
@@ -124,8 +157,21 @@ def get_active_patterns():
     return PATTERNS + _load_custom_patterns()
 
 
+# ── Regex fallback implementations ───────────────────────────────────────
+
 def detect_pii(text: str) -> list[dict]:
     """Scan text and return a list of detected PII matches."""
+    # Try service first
+    client = _get_client()
+    if client is not None:
+        try:
+            resp = client.post("/analyze", json={"text": text})
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            logger.warning("PII Guard service call failed, using regex: %s", e)
+
+    # Regex fallback
     findings = []
     for regex, placeholder, label in get_active_patterns():
         for m in regex.finditer(text):
@@ -143,26 +189,39 @@ def detect_pii(text: str) -> list[dict]:
 def sanitize_for_llm(text: str, enabled: bool = True) -> tuple[str, list[dict]]:
     """Sanitize text by redacting detected PII patterns.
 
-    Uses character-level claim map: first pattern at each position wins.
-    This avoids offset corruption from overlapping replacements.
+    Uses the PII Guard service when available, falls back to regex.
 
     Returns: (sanitized_text, redaction_log)
     """
     if not enabled or not text:
         return text, []
 
+    # Try service first
+    client = _get_client()
+    if client is not None:
+        try:
+            resp = client.post("/sanitize", json={"text": text})
+            if resp.status_code == 200:
+                data = resp.json()
+                log = data.get("redactions", [])
+                if log:
+                    summary = ', '.join(f"{l['label']}({l['placeholder']})" for l in log)
+                    logger.info("PII redacted (service): %s", summary)
+                return data["text"], log
+        except Exception as e:
+            logger.warning("PII Guard service sanitize failed, using regex: %s", e)
+
+    # Regex fallback
     findings = detect_pii(text)
     if not findings:
         return text, []
 
-    # Build claim map: first pattern at each character position wins
     claim = [None] * len(text)
     for finding in findings:
         for i in range(finding['start'], min(finding['end'], len(text))):
             if claim[i] is None:
                 claim[i] = finding
 
-    # Walk text, build output
     result = []
     log = []
     i = 0
@@ -183,7 +242,7 @@ def sanitize_for_llm(text: str, enabled: bool = True) -> tuple[str, list[dict]]:
 
     if log:
         summary = ', '.join(f"{l['label']}({l['placeholder']})" for l in log)
-        logger.info("PII redacted: %s", summary)
+        logger.info("PII redacted (regex fallback): %s", summary)
 
     return ''.join(result), log
 
@@ -191,13 +250,29 @@ def sanitize_for_llm(text: str, enabled: bool = True) -> tuple[str, list[dict]]:
 def sanitize_messages(messages: list[dict], enabled: bool = True) -> tuple[list[dict], list[dict]]:
     """Sanitize all messages in a conversation before sending to LLM.
 
-    Handles string content and list-of-content-blocks (multimodal).
+    Uses the PII Guard service when available, falls back to per-message regex.
 
     Returns: (sanitized_messages, combined_redaction_log)
     """
     if not enabled or not messages:
         return messages, []
 
+    # Try service first (single batch call)
+    client = _get_client()
+    if client is not None:
+        try:
+            resp = client.post("/sanitize/messages", json={"messages": messages})
+            if resp.status_code == 200:
+                data = resp.json()
+                redactions = data.get("redactions", [])
+                if redactions:
+                    summary = ', '.join(f"{l['label']}({l['placeholder']})" for l in redactions)
+                    logger.info("PII redacted (service, batch): %s", summary)
+                return data["messages"], redactions
+        except Exception as e:
+            logger.warning("PII Guard service batch sanitize failed, using per-message regex: %s", e)
+
+    # Regex fallback: per-message
     all_redactions = []
     sanitized = []
 
