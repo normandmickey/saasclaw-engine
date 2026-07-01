@@ -20,8 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pii-guard = ["presidio-analyzer>=2.2", "spacy>=3.7"]
+pii-guard = ["presidio-analyzer>=2.2", "presidio-anonymizer>=2.2", "spacy>=3.7", "fastapi>=0.100", "uvicorn>=0.23"]
 vector-store = ["chromadb>=0.4"]
+task-queue = ["celery[redis]>=5.3"]
 dev = [
     "pytest",
     "pytest-django",
