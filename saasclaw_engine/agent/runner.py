@@ -69,8 +69,10 @@ def _estimate_cost(provider, model, prompt_tokens, completion_tokens):
 _last_usage = {}
 
 
-MAX_TOOL_ROUNDS = 100  # Cap LLM round-trips per turn
-MAX_TOTAL_TOOL_CALLS = 300  # Hard cap on total tool calls per turn
+MAX_TOOL_ROUNDS = 30  # Cap LLM round-trips per turn (was 100)
+MAX_TOTAL_TOOL_CALLS = 60  # Hard cap on total tool calls per turn (was 300)
+MAX_TOOL_COST_PER_TURN = 0.50  # $0.50 USD per turn before forced stop (Zai pricing)
+EFFICIENCY_WARNING_THRESHOLD = 12  # Warn the model to wrap up after this many calls
 
 
 # ---------------------------------------------------------------------------
@@ -229,56 +231,87 @@ def _strip_permission_question(text: str, has_tool_calls: bool) -> str:
 
 
 def _compact_conversation(conversation: list[dict], keep_recent: int = 4) -> list[dict]:
-    """Compact older messages in conversation history to reduce LLM context size.
+    """Compact older messages to reduce LLM context size and token usage.
 
     Keeps the most recent ``keep_recent`` tool-result exchanges at full fidelity.
-    Older tool results are replaced with a one-line summary (tool name + char count).
-    Older assistant messages are truncated to ~100 chars.
+    Older tool results are replaced with one-line summaries.
+    Older assistant messages are truncated.
+    Older user messages are summarized.
+    Old user+assistant pairs that form a complete Q&A are collapsed into a single summary.
     """
     if len(conversation) <= keep_recent * 2:
         return conversation
 
-    # Identify indices that belong to recent turns (count from the end)
-    # A "turn" is roughly: assistant + tool. We want to keep the last keep_recent
-    # tool messages and everything after them intact.
     tool_indices = [i for i, m in enumerate(conversation) if m.get("role") == "tool"]
     if len(tool_indices) <= keep_recent:
         return conversation
 
     cutoff_idx = tool_indices[-keep_recent]
 
-    compacted = []
-    for i, msg in enumerate(conversation):
-        if i >= cutoff_idx:
-            compacted.append(msg)
-            continue
+    # Group older messages into user-assistant pairs and summarize them
+    pre_cutoff = []
+    post_cutoff = list(conversation[cutoff_idx:])
 
+    # Build conversation pairs before cutoff
+    current_pair = []
+    pairs = []
+    for i, msg in enumerate(conversation[:cutoff_idx]):
         role = msg.get("role", "")
         content = msg.get("content", "")
         if not isinstance(content, str):
             content = str(content)
 
-        if role == "tool":
-            # Summarise old tool results
+        if role in ("user", "assistant"):
+            if role == "user" and current_pair:
+                pairs.append(current_pair)
+                current_pair = []
+            current_pair.append((role, content, msg))
+        elif role == "tool":
+            # Summarize tool results
             tc = msg.get("tool_call") or {}
             tool_name = tc.get("name", "tool") if isinstance(tc, dict) else "tool"
-            char_count = len(content)
-            summary = f"[{tool_name} result - {char_count:,} chars]"
-            new_msg = dict(msg)
-            new_msg["content"] = summary
-            compacted.append(new_msg)
-        elif role == "assistant":
-            # Truncate old assistant transition text
-            if len(content) > 100:
-                new_msg = dict(msg)
-                new_msg["content"] = content[:100] + "…"
-                compacted.append(new_msg)
-            else:
-                compacted.append(msg)
-        else:
-            compacted.append(msg)
+            current_pair.append(("tool", f"[{tool_name}: {len(content)} chars]", msg))
+    if current_pair:
+        pairs.append(current_pair)
 
-    return compacted
+    # Collapse older pairs into summary messages
+    summary_count = len(pairs) - keep_recent
+    for idx, pair in enumerate(pairs):
+        if idx < summary_count:
+            # Older pair — collapse to summary
+            user_msgs = [c for r, c, _ in pair if r == "user"]
+            assistant_msgs = [c for r, c, _ in pair if r == "assistant"]
+            if user_msgs:
+                user_summary = user_msgs[0][:60]
+                if len(user_msgs[0]) > 60:
+                    user_summary += "…"
+            else:
+                user_summary = ""
+            if assistant_msgs:
+                assistant_summary = assistant_msgs[-1][:80]
+                if len(assistant_msgs[-1]) > 80:
+                    assistant_summary += "…"
+            else:
+                assistant_summary = "(action taken)"
+            if user_summary and assistant_summary:
+                pre_cutoff.append({
+                    "role": "assistant",
+                    "content": f"[Earlier] User: {user_summary}\nAgent: {assistant_summary}",
+                })
+            elif assistant_summary:
+                pre_cutoff.append({
+                    "role": "assistant",
+                    "content": f"[Earlier] {assistant_summary}",
+                })
+        else:
+            # Recent pairs — keep but truncate long content
+            for role, content, msg in pair:
+                new_msg = dict(msg)
+                if len(content) > 200:
+                    new_msg["content"] = content[:200] + "…"
+                pre_cutoff.append(new_msg)
+
+    return pre_cutoff + post_cutoff
 
 
 def _system_prompt(workspace_path: str, project_name: str, project_notes: str = '', project_directives: str = '', profile_prompt: str = '', allowed_tools: list = None, project_todos: list = None, project_context: str = '') -> str:
@@ -323,6 +356,14 @@ def _system_prompt(workspace_path: str, project_name: str, project_notes: str = 
 
 CRITICAL: Never ask the user for permission, confirmation, or approval. Never say "Shall I proceed?", "Want me to continue?", "Should I go ahead?", or anything similar. The user told you what they want -- just do it. Execute tool calls immediately. Every time you ask a question instead of acting, you lock the user out for minutes.
 
+BE EFFICIENT:
+- Solve the task in as few tool calls as possible. Small changes = 1-3 tool calls, not 10.
+- Don't over-engineer. If a 5-line change works, don't refactor the whole file.
+- Don't probe or test extensively before making the change. Read the file, make the change, move on.
+- Batch related operations: read multiple files at once, make multiple edits in one replace_in_file call.
+- Don't write lengthy explanations before code changes. Brief status, then code.
+- If you find yourself doing more than 15 tool calls, reassess. There's probably a simpler approach.
+
 Project: {project_name}
 {ctx}{context_section}{inventory_section}{notes_section}{profile_section}
 Tools: {tools_str}
@@ -339,7 +380,7 @@ Rules:
 - DO NOT manually deploy (npm run build, next build, etc.) -- the system auto-deploys on commit. Just commit your changes and tell the user deployment is in progress.
 - ACTION > EXPLANATION: When the user asks for something, your FIRST tool call MUST be replace_in_file or write_file. Never output a plan/analysis without writing code. Read the file, then IMMEDIATELY write the fix.
 - MODULAR CODE (CRITICAL): For Next.js/React projects, NEVER inline game/app logic into page.tsx. Always create a custom hook in src/hooks/ (e.g., useCheckers.ts) and a pure-logic module in src/lib/ (e.g., checkers.ts). page.tsx should only import hooks and dispatch between phases. If you are adding a new game: FIRST create src/lib/<game>.ts, THEN create src/hooks/use<Game>.ts, THEN add a thin import + dispatch case to page.tsx. Inlining logic into page.tsx is the #1 failure mode and causes timeouts and broken builds. If a .saasclaw config exists in the project root, FOLLOW its file_limits and architecture.rules exactly — writes that exceed configured limits will be BLOCKED.
-- Be concise in explanations. Maximum 3 sentences before or after a code change.
+- Be concise in explanations. Maximum 2 sentences before or after a code change.
 - Use update_todos to plan tasks before starting work and mark items done as you complete them.
 - NEVER ask the user for permission or confirmation. Just plan and execute. Asking "Shall I proceed?" or "Want me to continue?" blocks the user for the entire duration of your tool calls. Trust the user's initial request and build it.
 - STEP-BY-STEP EXECUTION: For tasks involving 3+ files or multiple phases (scaffolding, logic, styling, data, tests), break the work into numbered steps and execute them sequentially. Write each step's files, then commit before moving to the next step. This gives users visible progress and prevents context loss. Example: Step 1 - create project structure and config → Step 2 - implement core logic → Step 3 - add UI/views → Step 4 - tests → Step 5 - final polish. Commit between steps.
@@ -1551,6 +1592,23 @@ def run_agent(
         _trim_context(messages)
         if session_id:
             set_agent_activity(session_id, "Thinking…" if round_num == 0 else "Figuring out next step…", tool_call_count)
+
+        # Efficiency: inject a wrap-up hint if the model is taking too many steps
+        if tool_call_count >= EFFICIENCY_WARNING_THRESHOLD:
+            messages.append({
+                "role": "system",
+                "content": "You've made many tool calls. Wrap up the current task immediately — commit what you have and stop. Don't start new work.",
+            })
+            logger.info("Efficiency warning injected at round %d (tool_calls=%d)", round_num, tool_call_count)
+
+        # Cost check: force stop if budget exceeded
+        if total_usage["total_tokens"] > 0:
+            est = _estimate_cost(provider or os.environ.get("STUDIO_LLM_PROVIDER", "zai"), model or os.environ.get("STUDIO_MODEL", "glm-5.1"), total_usage["prompt_tokens"], total_usage["completion_tokens"])
+            if est > MAX_TOOL_COST_PER_TURN:
+                msg_text = f"⚠️ Reached ${est:.2f} spend limit for this turn. Committing progress and stopping."
+                new_messages.append({"role": "assistant", "content": msg_text, "tool_call": {}})
+                logger.warning("Cost limit hit: $%.2f at round %d", est, round_num)
+                break
 
         # Sanitize messages before sending to LLM (redact PII)
         messages, _pii_redactions = sanitize_messages(messages)
