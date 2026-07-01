@@ -38,7 +38,8 @@ include = ["saasclaw_engine*"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "saasclaw_engine.test_settings"
 python_files = ["test_*.py"]
-addopts = "-v"
+testpaths = ["saasclaw_engine"]
+addopts = "-v --override-ini=filterwarnings=ignore::DeprecationWarning"
 markers = [
     "django_db: marks tests that need database access",
 ]

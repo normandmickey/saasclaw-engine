@@ -31,7 +31,7 @@ def main():
 
     # Run pytest
     result = subprocess.call(
-        [sys.executable, "-m", "pytest", "-v", "--tb=short"],
+        [sys.executable, "-m", "pytest", "saasclaw_engine", "-v", "--tb=short"],
         cwd=ENGINE_DIR,
     )
     sys.exit(result)
