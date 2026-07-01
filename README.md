@@ -695,7 +695,7 @@ The engine applies multiple layers of protection:
 | Layer | What it does | Always active? |
 |-------|-------------|---------------|
 | **PII Guard** | Detects and redacts sensitive patterns in LLM messages | Yes, every LLM call |
-| **Prompt Injection Guard** | Scans user input for injection patterns before LLM calls | Yes, every message |
+| **Prompt Injection Guard** | Scans user input for injection patterns before LLM calls (sunglasses library) | Yes, every message |
 | **LLM Gateway** | Routes requests to local LLM, blocks cloud providers | Per-project toggle |
 | **Audit logging** | Logs redaction counts, injection blocks, and pattern types | Yes |
 
